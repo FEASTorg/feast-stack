@@ -1,10 +1,10 @@
 # feast-stack
 
-Deployment and orchestration for the FEAST stack.
+This repository contains the high-level details of the FEAST stack and it's various components as well as example implementations and deployments of the stack.
 
 ## Dev Setup
 
-For getting started with development on a new Linux machine:
+In general, for getting started with development on a new Linux machine:
 
 ```sh
 sudo apt update
