@@ -1,6 +1,6 @@
-# Bioreactor Automation Plan - Stage 1 (Overall + Stir/Feed)
+# Bioreactor Automation Plan - Stage 1 (Stir + Feed)
 
-Status: Execution plan
+Status: Locked execution plan (final)
 Scope: First automation cut for the current lab machine, focused on stable stirring and scheduled feed dosing only.
 
 ## 1) Objective
@@ -8,204 +8,146 @@ Scope: First automation cut for the current lab machine, focused on stable stirr
 Implement a low-risk automation layer that:
 
 1. Keeps impeller behavior deterministic.
-2. Runs feed dosing on a time schedule.
+2. Runs feed dosing on a predictable schedule.
 3. Preserves manual operator authority and safe fallback.
 
-This stage intentionally excludes pH closed-loop dosing logic.
+Stage 1 excludes pH closed-loop dosing logic.
 
-## 2) Machine Mapping (Current Hardware Contract)
+## 2) Non-Negotiable Architecture Boundary
 
-- `bread0/rlht0 @ 0x0A`: temperature sensing context only.
-- `bread0/dcmt0 @ 0x14`:
-  - channel 1 = impeller stirring motor
-  - channel 2 = media/feed dosing motor
-- `bread0/dcmt1 @ 0x15`:
-  - channel 1 = acid pump (reserved for Stage 2)
-  - channel 2 = base pump (reserved for Stage 2)
-- `ezo0/ph0 @ 0x63`: pH sensing.
-- `ezo0/do0 @ 0x61`: DO sensing.
+1. `anolis` core stays provider-agnostic.
+2. No provider/device IDs in core C++ (`bread0`, `ezo0`, `dcmt0`, etc.).
+3. No provider function names in core C++ (`set_open_loop`, `set_mode`, etc.).
+4. No machine/stage naming in core filenames/types.
+5. Machine semantics live in machine BT/config assets only.
 
-## 3) Control Model
+## 3) External BT Usage Alignment (BehaviorTree.CPP)
 
-- Runtime startup remains safe-by-default (`IDLE`).
-- Automation runs only in `AUTO`.
-- Recommended gating policy for this stage: `manual_gating_policy: BLOCK`.
-- Operator can always drop to `MANUAL` for recovery.
+1. Use ports/blackboard remapping as the primary dataflow model.
+2. Keep per-tick safety checks in a `ReactiveSequence` so conditions are re-evaluated continuously.
+3. Keep BT actions short; avoid long blocking work in `tick()`.
+4. If long-running work is needed later, use asynchronous/stateful node patterns that return `RUNNING`.
 
-Important implementation constraints from current stack:
+References:
+- https://www.behaviortree.dev/docs/tutorial-basics/tutorial_02_basic_ports/
+- https://www.behaviortree.dev/docs/tutorial-basics/tutorial_04_sequence
+- https://www.behaviortree.dev/docs/guides/ports_vs_blackboard/
 
-1. `dcmt0 set_open_loop` updates both motor channels in one call.
-2. DCMT firmware ignores `set_open_loop` when mode is not `open_loop`.
-3. `CallDevice` is synchronous in current Anolis BT nodes, so blocking calls stall the tree tick loop.
-4. BT tick loop executes only in `AUTO`, so mode-exit actuator handoff must be implemented in runtime mode-change callback path, not as BT-only logic.
+## 4) Current Internal Facts (Anolis As-Is)
 
-## 4) Foundation Sprint (Required Before Stage 1 BT Logic)
+1. Core BT node set: `ReadSignal`, `CheckQuality`, `CallDevice`, `GetParameter`.
+2. `GetParameter` is numeric-only today (`double`/`int64`).
+3. `CallDevice` is synchronous and accepts JSON args string.
+4. BT ticks only in `AUTO` mode.
+5. Valid mode transitions are enforced by `ModeManager`:
+   - `MANUAL <-> AUTO`
+   - `MANUAL <-> IDLE`
+   - `Any -> FAULT`
+   - `FAULT -> MANUAL`
+   - `AUTO -> IDLE` is invalid.
+6. `CallRouter` blocks control operations in `IDLE`.
 
-These helper primitives should land first.
+Consequence:
 
-### A) DCMT command composer helper
+1. We need a small generic foundation pass before machine actuation logic is maintainable.
+2. Handoff writes must execute before entering `IDLE`.
 
-Goal:
-- Compose logical intents into one atomic DCMT open-loop command.
+## 5) Stage 1.0 Foundation Pass (Core Generic Only)
 
-Input intents:
-- impeller intent -> channel 1 command
-- feed intent -> channel 2 command
+### 5.1 Generic BT primitives
 
-Output:
-- one `set_open_loop(motor1_pwm, motor2_pwm)` payload
+1. `GetParameterBool` node.
+2. `PeriodicPulseWindow` node:
+   - Inputs: enable, startup delay, interval, pulse width, max/hour.
+   - Output: active-window bool.
+3. `EmitOnChangeOrInterval` node/decorator:
+   - Emits only on command change or keepalive timeout.
+4. `BuildArgsJson` generic node:
+   - Build JSON args from typed input ports.
+   - No provider/device semantics in the node.
 
-Why first:
-- Removes tree-level channel-clobbering risk.
-- Keeps Stage 1 automation readable and deterministic.
+### 5.2 Generic runtime transition hooks
 
-### B) Periodic pulse scheduler primitive
+Add generic transition hooks in runtime config with explicit timing:
 
-Goal:
-- Reusable schedule primitive for startup delay + interval + pulse width + max pulses/hour.
+1. `before_transition` hooks (for safety writes that must happen before mode switch).
+2. `after_transition` hooks (observability/non-actuating side-effects).
 
-Why first:
-- Avoid fragile ad-hoc timing logic in XML scripts.
-- Reuse directly in Stage 2 pH pulse dosing.
+This avoids IDLE-gating conflicts for safety actuation.
 
-### C) Bool-capable parameter access in BT
+## 6) Machine Mapping (Machine Assets Only)
 
-Goal:
-- Add bool-friendly parameter access for BT without breaking existing numeric `GetParameter` behavior.
+Bioreactor-specific mapping (outside core code):
 
-Preferred implementation:
-- Keep `GetParameter` numeric for compatibility.
-- Add dedicated bool node (e.g., `GetParameterBool`).
+1. `bread0/rlht0 @ 0x0A`: temp sensing context.
+2. `bread0/dcmt0 @ 0x14`:
+   - channel 1 = impeller
+   - channel 2 = feed
+3. `bread0/dcmt1 @ 0x15`:
+   - channel 1 = acid (Stage 2)
+   - channel 2 = base (Stage 2)
+4. `ezo0/ph0 @ 0x63`
+5. `ezo0/do0 @ 0x61`
 
-### D) Open-loop mode guard helper
+## 7) Stage 1 BT Behavior (Machine Layer)
 
-Goal:
-- Before first actuation, enforce and verify `dcmt0 mode == open_loop`.
+Per tick in `AUTO`:
 
-Behavior:
-1. Send `set_mode(open_loop)` if needed.
-2. Verify via `mode` signal readback.
-3. If mode cannot be confirmed, fail safe and prevent actuation.
+1. Re-check required quality gates (`ReactiveSequence` pattern).
+2. Compute impeller command from parameters.
+3. Compute feed active window from scheduler output.
+4. Compose one atomic command for `dcmt0` open-loop write:
+   - `motor1_pwm` = impeller command
+   - `motor2_pwm` = feed command (or 0 when inactive)
+5. Emit only on change or keepalive interval.
 
-### E) Edge-triggered command emission policy
+Design rule:
 
-Goal:
-- Emit actuation calls only on command changes (or keepalive interval), not every tick.
+1. Use one write path for both DCMT channels to avoid channel clobbering.
 
-Why first:
-- Reduces bus traffic and post-call refresh load.
-- Lowers chance of intermittent I2C noise amplifying into repeated failures.
+## 8) Mode-Exit Handoff Policy (Valid Transitions Only)
 
-### F) Mode-exit handoff behavior (Runtime callback path)
+Required safety behavior:
 
-Goal:
-- Define deterministic actuator state on `AUTO -> MANUAL/FAULT/IDLE`.
+1. `AUTO -> MANUAL`: feed off; impeller policy explicit.
+2. `Any -> FAULT`: safe outputs (feed off at minimum; optional full-off policy by config).
+3. `MANUAL -> IDLE`: if actuation shutdown required, execute in `before_transition` hook.
 
-Implementation location:
-- Runtime mode-change callback path (not BT tick path), because BT stops ticking outside `AUTO`.
+Do not plan against `AUTO -> IDLE` directly; that transition is invalid.
 
-Recommended default:
-1. On `AUTO -> MANUAL`: send one handoff command with feed off, impeller preserved.
-2. On `AUTO -> FAULT` or `AUTO -> IDLE`: force both channels off.
+## 9) Stage 1 Parameters (Machine Profile)
 
-### G) Call timeout and retry pattern for BT actions
+1. `impeller_enable` (bool)
+2. `impeller_pwm` (int64)
+3. `feed_enable` (bool)
+4. `feed_pwm` (int64)
+5. `feed_interval_s` (int64)
+6. `feed_pulse_s` (int64)
+7. `feed_startup_delay_s` (int64)
+8. `feed_max_pulses_per_hour` (int64)
+9. `command_keepalive_s` (int64)
+10. `command_min_spacing_ms` (int64)
+11. `write_failure_limit` (int64)
 
-Goal:
-- Wrap action calls with timeout/retry policy in tree design.
+## 10) Validation Sequence
 
-Why first:
-- Current `CallDevice` node is synchronous; bounded retries/timeouts prevent long stalls from turning into unstable behavior.
+1. Unit-test new generic primitives.
+2. Run read-only BT sanity with no actuation.
+3. Run Stage 1 with feed disabled (impeller only).
+4. Enable feed schedule and verify timing.
+5. Verify no excess writes (change/keepalive behavior).
+6. Verify transition-hook handoff behavior.
+7. Inject write failures and verify escalation behavior.
 
-### Foundation acceptance
+Acceptance criteria:
 
-1. Composer helper unit-tested.
-2. Scheduler primitive unit-tested with deterministic time fixtures.
-3. Bool BT parameter access available and tested.
-4. Open-loop guard verified on real hardware.
-5. Edge-triggered emission policy implemented and tested.
-6. Mode-exit handoff behavior validated through runtime mode-change callback transitions.
-7. Timeout/retry pattern validated in BT execution flow.
+1. Deterministic stir/feed behavior with no channel clobber.
+2. Tunable schedule without restart.
+3. Safe recovery via `MANUAL` path.
+4. Boundary audit passes (no provider semantics in core code).
 
-## 5) Stage 1 BT Behavior (Built On Foundation Primitives)
+## 11) Out of Scope
 
-### A) Preconditions per cycle
-
-1. Verify `bread0/dcmt0` quality is usable.
-2. Verify `dcmt0` mode is `open_loop` (guarded path).
-3. If either check fails, do not actuate.
-
-### B) Impeller enforcement
-
-- Maintain impeller command from parameters:
-  - enabled -> configured PWM
-  - disabled -> 0 PWM
-
-### C) Feed pulse scheduling
-
-- Feed is open-loop time dosing.
-- Scheduler computes pulse windows from interval + pulse + limits.
-- Active window -> feed channel uses configured feed PWM.
-- Outside window -> feed channel is 0 PWM.
-
-### D) Compose and emit command
-
-1. Compose desired pair:
-   - `motor1_pwm = impeller_command`
-   - `motor2_pwm = feed_command`
-2. Emit only if changed from last command (or keepalive due).
-
-## 6) Runtime Parameters (Stage 1)
-
-Recommended parameter set:
-
-1. `impeller_enable` (bool), default `true`.
-2. `impeller_pwm` (int64), default `35`, range `[-100,100]`.
-3. `feed_enable` (bool), default `true`.
-4. `feed_pwm` (int64), default `45`, range `[-100,100]`.
-5. `feed_interval_s` (int64), default `900`, range `[30,86400]`.
-6. `feed_pulse_s` (int64), default `3`, range `[1,600]`.
-7. `feed_startup_delay_s` (int64), default `120`, range `[0,3600]`.
-8. `feed_max_pulses_per_hour` (int64), default `8`, range `[1,120]`.
-9. `dcmt0_enforce_open_loop` (bool), default `true`.
-10. `dcmt0_command_keepalive_s` (int64), default `30`, range `[5,3600]`.
-11. `dcmt_command_min_spacing_ms` (int64), default `500`, range `[50,10000]`.
-12. `dcmt_write_failure_limit` (int64), default `5`, range `[1,100]`.
-
-Operational rules:
-
-1. If `feed_enable=false`, feed command stays 0.
-2. If mode guard fails, actuation is blocked.
-
-## 7) Failure and Recovery Behavior
-
-1. On call failure for `dcmt0`, log and retry under configured policy.
-2. If failures exceed configured limit in a rolling window, switch mode to `MANUAL` and alert operator.
-3. Recovery path stays explicit: inspect in `MANUAL`, then transition to `AUTO`.
-
-## 8) Validation Sequence (Stage 1)
-
-1. Complete Foundation Sprint acceptance first.
-2. Start in `IDLE`, verify runtime + providers healthy.
-3. Transition to `MANUAL`, confirm manual motor control works.
-4. Transition to `AUTO` with:
-   - `impeller_enable=true`
-   - `feed_enable=false`
-   - verify impeller hold only.
-5. Enable feed and verify pulse schedule accuracy.
-6. Change feed params live via `/v0/parameters`; verify no restart required.
-7. Verify edge-triggered emission (no unnecessary repeated writes when command unchanged).
-8. Verify mode-exit handoff behavior via runtime transitions (`AUTO -> MANUAL`, `AUTO -> FAULT`).
-9. Inject write-failure scenario and verify configured escalation.
-
-Acceptance:
-
-1. No channel clobbering between stir/feed.
-2. Impeller remains stable between feed pulses.
-3. Feed schedule is deterministic and tunable.
-4. Operator can regain manual control safely at any time.
-
-## 9) Out of Scope for Stage 1
-
-1. pH closed-loop control.
-2. Acid/base pump automation on `dcmt1`.
-3. Any DO-driven control loop.
+1. pH control logic.
+2. Acid/base dosing logic.
+3. DO-driven control logic.

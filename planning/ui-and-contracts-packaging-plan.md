@@ -1,153 +1,73 @@
 # UI and Contracts Packaging Plan (Transient)
 
-Status: Working draft for near-term execution.  
-Purpose: Decide how to package UI tooling and harden shared contracts to reduce drift across runtime, composer, and clients.
+Status: Working draft (finalized for current phase)
+Purpose: Reduce drift across runtime, machine configs, operator UI, and composer before any repo-boundary split.
 
 ## 1) Problem Statement
 
-The stack is now functionally viable for real hardware validation, but three related issues need a coordinated plan:
+Four coupled drift risks remain:
 
-1. Tool packaging boundary:
-   - `operator-ui` and `system-composer` currently live under `anolis/tools/`.
-   - We need a stable long-term repo boundary strategy.
+1. Tool packaging boundary is unresolved (`operator-ui` and `system-composer` currently in `anolis/tools/`).
+2. Runtime config contract is prose-heavy and vulnerable to drift.
+3. HTTP API contract is prose-heavy and vulnerable to drift.
+4. Automation machine-contract boundary is not yet formalized end-to-end.
 
-2. Runtime config contract drift risk:
-   - Runtime config has a canonical prose reference.
-   - Composer already uses a machine-readable schema for `system.json`.
-   - Runtime YAML schema is not yet machine-readable as a single validation source of truth.
+## 2) Current Position
 
-3. HTTP API contract drift risk:
-   - API behavior is documented in prose.
-   - There is no canonical OpenAPI contract + lint gate to keep runtime and UI/client assumptions synchronized.
+1. Keep `operator-ui` and `system-composer` in `anolis` for now.
+2. Prioritize contract hardening before any repo split.
+3. Treat machine BT/config as first-class contract assets, not ad-hoc files.
 
-## 2) Current State (Observed)
+## 3) Contract Hardening Scope
 
-- `system-composer` has JSON Schema for `system.json`:
-  - `anolis/tools/system-composer/schema/system.schema.json`
-- Runtime config contract is currently prose-first:
-  - `anolis/docs/configuration-schema.md`
-- HTTP API is documented prose-first:
-  - `anolis/docs/http-api.md`
-- Packaging discussion already exists in `anolis/TODO.md`, but needs an execution-ready plan.
+### 3.1 Runtime config schema (normative)
 
-## 3) Decision: Near-Term Packaging Model
+1. Add machine-readable runtime schema.
+2. Encode required sections, types, ranges, enums, and invariants.
+3. Enforce schema validation in CI and local verification.
+4. Keep prose docs explanatory; schema becomes normative.
 
-Recommended immediate decision:
+### 3.2 Composer-to-runtime alignment
 
-- Keep `operator-ui` and `system-composer` in-repo (inside `anolis`) for now.
+1. Define explicit transform contract (`system.json` -> runtime YAML).
+2. Add fixture tests for generated runtime configs.
+3. Block CI on mapping drift.
 
-Why:
+### 3.3 HTTP API contract (OpenAPI)
 
-- We are still actively changing runtime behavior, BT integration, and machine profile flows.
-- Early repo splits increase coordination burden and increase contract drift risk unless schemas are already strong and enforced.
-- In-repo keeps iteration speed high while hardening contracts.
+1. Add OpenAPI spec for active `/v0` endpoints.
+2. Lint spec in CI.
+3. Keep examples aligned with real runtime responses.
 
-## 4) Target Mid-Term Packaging Model
+### 3.4 Automation/machine boundary contract
 
-After contract hardening (Section 5) and stabilization gates are met, move to:
+1. Formalize ownership:
+   - Core runtime: generic primitives only.
+   - Machine profile: provider/device IDs, function names, channel mapping.
+2. Add a boundary check in CI/local verification to detect provider-specific strings in core automation code.
+3. Add runtime schema entries for transition hooks (`before_transition` / `after_transition`) as generic structures.
+4. Version machine profile assets as part of machine package promotion.
 
-- One dedicated tools/UI repo (single app/repo boundary), not two independent repos initially.
+## 4) Packaging Decision Gates
 
-Reasoning:
+Do not split tools out of `anolis` until all pass:
 
-- `operator-ui` and `system-composer` share domain objects (devices, signals, capabilities, mode/control semantics).
-- A single repo allows shared typed client, shared schema package, unified CI, and lower drift probability.
-- Splitting into two repos can still be done later if ownership and release cadence diverge significantly.
+1. Runtime schema is CI-enforced.
+2. Composer-to-runtime transform tests are stable.
+3. OpenAPI lint gate is green.
+4. Automation boundary checks are in place.
+5. At least one full machine profile runbook executes cleanly from package entrypoint.
 
-## 5) Contract Hardening Plan (Before Any Repo Split)
+## 5) Execution Order
 
-## 5.1 Runtime config schema (machine-readable)
+1. Runtime schema + validation.
+2. Composer transform alignment tests.
+3. OpenAPI baseline + lint.
+4. Automation boundary checks + transition-hook schema coverage.
+5. Re-evaluate packaging split decision.
 
-Goal:
+## 6) Out of Scope
 
-- Introduce canonical runtime YAML schema (`JSON Schema 2020-12`) with validation tooling.
-
-Plan:
-
-1. Create `anolis/schemas/runtime-config.schema.json`.
-2. Encode all current constraints from docs and loader behavior:
-   - required/optional sections
-   - numeric ranges
-   - enum sets
-   - CORS invariants (`*` vs credentials)
-   - provider stanza constraints
-3. Add schema validation to:
-   - CI
-   - local verification script
-4. Update docs:
-   - prose doc becomes explanatory
-   - schema file becomes normative
-
-Acceptance:
-
-- Known-good configs pass.
-- Known-bad fixtures fail with deterministic messages.
-- Composer/runtime generated configs validated by the same schema.
-
-## 5.2 Composer/runtime shared source of truth
-
-Goal:
-
-- Ensure generated runtime configs and runtime loader expectations stay synchronized.
-
-Plan:
-
-1. Define mapping between composer `system.json` and runtime YAML as explicit transform rules.
-2. Add test fixtures:
-   - `system.json -> rendered YAML -> schema validate`.
-3. Add regression tests for critical machine profiles (bioreactor, mixed-bus mock).
-
-Acceptance:
-
-- No generated config can bypass schema checks.
-- CI fails on mapping drift.
-
-## 5.3 HTTP API contract (OpenAPI)
-
-Goal:
-
-- Make `/v0` behavior machine-readable and linted.
-
-Plan:
-
-1. Add `anolis/api/openapi-v0.yaml`.
-2. Cover active endpoints first:
-   - devices, state, call, mode, runtime status, providers health
-3. Define status/error envelope consistently with runtime outputs.
-4. Add OpenAPI lint in CI.
-5. Optionally generate typed client artifacts for UI/composer integration.
-
-Acceptance:
-
-- OpenAPI lint passes in CI.
-- Endpoint behavior examples round-trip against real runtime responses.
-
-## 6) Packaging Decision Gates
-
-Do not move UI/tools out of `anolis` until all are true:
-
-1. Runtime config schema exists and is CI-enforced.
-2. Composer-to-runtime transform is tested and stable.
-3. OpenAPI v0 spec exists and is CI-linted.
-4. At least one complete machine profile runbook executes without ad-hoc edits.
-5. Two consecutive development cycles complete without contract breakage incidents.
-
-If all gates pass:
-
-- Execute repo split to a single tools/UI repo, preserving shared schema/client package.
-
-## 7) Proposed Execution Sequence
-
-1. Implement runtime config machine schema + CI validation.
-2. Wire composer output validation to the same schema.
-3. Add OpenAPI v0 + lint gate.
-4. Run one full cycle with bioreactor machine profile.
-5. Re-evaluate packaging boundary and decide:
-   - stay in-repo, or
-   - move to single tools/UI repo.
-
-## 8) Out of Scope
-
-- Immediate split into multiple tool repos.
-- Public API versioning policy beyond current v0 baseline.
-- Full auth model redesign for HTTP (tracked separately).
+1. Immediate multi-repo tool split.
+2. Broader auth redesign.
+3. API versioning policy expansion beyond current v0 baseline.
