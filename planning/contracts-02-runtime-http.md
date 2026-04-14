@@ -33,6 +33,16 @@ The HTTP surface is primarily documented in prose and inferred from runtime beha
 3. Captured golden examples:
    - Suggested path: `anolis/docs/http/examples/`
 
+## 4A) Config-Contract Relationship (Policy Lock)
+
+Config contract and HTTP contract are separate layers and remain separate in this wave.
+
+1. Runtime config schema defines static config shape and constraints.
+2. HTTP OpenAPI defines runtime operations and transport payloads.
+3. Shared concepts (for example mode enums, parameter value shapes, status code semantics) must stay parity-aligned through explicit conformance checks.
+4. Do not introduce cross-file shared schema fragments in this wave; prioritize parity checks first to avoid schema-dialect/tooling churn.
+5. Revisit shared fragment extraction only after `contracts-02` is stable in CI.
+
 ## 5) Required Endpoint Coverage
 
 Minimum set to specify now:
@@ -79,6 +89,7 @@ Required checks:
 2. OpenAPI validates structurally.
 3. Example JSON payloads validate against schema components.
 4. At least one runtime smoke job verifies core endpoints return contract-compatible payloads.
+5. Cross-contract parity checks pass for shared concepts (mode enums, parameter value shape, status code mapping).
 
 Suggested local workflow:
 
@@ -107,3 +118,5 @@ Done when:
    - Mitigation: only include fields with user-facing intent; keep internal fields optional where needed.
 3. Risk: Event/SSE payloads are underdefined.
    - Mitigation: mark SSE as provisional subsection with explicit TODO and validation target.
+4. Risk: Config and HTTP contracts diverge on overlapping concepts.
+   - Mitigation: parity checks now; shared schema fragment extraction considered only in a later, scoped follow-up.

@@ -46,3 +46,13 @@ Do not split tools out of `anolis` until all pass:
 1. Immediate multi-repo split of `operator-ui` and `system-composer`.
 2. Auth redesign or API governance beyond current `v0`.
 3. Provider-specific logic inside core runtime automation code.
+
+## Future Progression Note
+
+After `contracts-01` and `contracts-02` are stable and green in CI, evaluate a follow-up
+work item for shared schema fragments across config and HTTP contracts.
+
+1. Goal: define overlapping data structures once (where technically feasible).
+2. Constraint: only proceed if schema dialect/tooling choices are explicit and do not
+   destabilize existing gates.
+3. Priority: lower than completing current contract gates and machine packaging work.
