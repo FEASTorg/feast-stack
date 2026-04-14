@@ -60,6 +60,17 @@ Minimum set to specify now:
    - smoke conformance against a running runtime profile.
 5. Update docs to point to OpenAPI as source of truth.
 
+### First Slice (Prepare + Lock Baseline)
+
+1. Treat `anolis/docs/contracts/runtime-http-baseline.md` as the implementation anchor.
+2. Resolve implementation-vs-doc drift before writing spec details.
+3. Freeze endpoint list from `core/http/server.cpp` route registration.
+4. Declare SSE (`/v0/events`) as supported with provisional schema depth in initial OpenAPI.
+
+### Current Drift Notes (as of baseline)
+
+1. `/v0/automation/status` and `/v0/events` are implemented but under-documented relative to core REST endpoints.
+
 ## 7) CI and Local Gates
 
 Required checks:
@@ -96,4 +107,3 @@ Done when:
    - Mitigation: only include fields with user-facing intent; keep internal fields optional where needed.
 3. Risk: Event/SSE payloads are underdefined.
    - Mitigation: mark SSE as provisional subsection with explicit TODO and validation target.
-

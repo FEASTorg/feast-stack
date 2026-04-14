@@ -18,7 +18,7 @@ Purpose: Point to the focused planning documents and lock execution order.
 
 ## Execution Order
 
-1. Runtime config contract (normative schema first).
+1. Runtime config contract (normative schema first, including parser-alignment and duplicate-key close-out).
 2. Runtime HTTP contract (OpenAPI baseline + conformance checks).
 3. Machine profile packaging contract (profile manifest + validation built on the config contract).
 4. UI/composer alignment against the finalized config + HTTP contracts and machine profile structure.
@@ -36,9 +36,10 @@ Order rationale:
 Do not split tools out of `anolis` until all pass:
 
 1. Runtime config schema is validated in CI.
-2. HTTP OpenAPI spec is linted and conformance checked.
-3. Machine profile package can be validated and executed from a single entrypoint.
-4. UI and composer pass fixture-based contract checks against runtime config + HTTP contracts.
+2. Runtime config parser-alignment close-out is complete (duplicate-key rejection + parser edge fixtures).
+3. HTTP OpenAPI spec is linted and conformance checked.
+4. Machine profile package can be validated and executed from a single entrypoint.
+5. UI and composer pass fixture-based contract checks against runtime config + HTTP contracts.
 
 ## Out of Scope (for this wave)
 

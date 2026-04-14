@@ -1,6 +1,6 @@
 # Runtime Config Contract Plan
 
-Status: Ready to execute.
+Status: In progress (hardening/close-out required before moving to contracts-02).
 Priority: Highest.
 Intent: Define and enforce one authoritative runtime-config contract for Anolis.
 
@@ -32,7 +32,7 @@ Out of scope for this document:
 
 This plan is based on current runtime behavior and must preserve it first.
 
-1. Unknown keys: warned and ignored (root and known map sections).
+1. Unknown keys: warned and ignored (root and most nested map sections).
 2. Deprecated but accepted:
    - `automation.behavior_tree_path` alias for `automation.behavior_tree`.
    - flat telemetry keys under `telemetry.*` (`influx_url`, `influx_org`, `influx_bucket`, `influx_token`, `batch_size`, `flush_interval_ms`) with deprecation warnings.
@@ -40,6 +40,12 @@ This plan is based on current runtime behavior and must preserve it first.
    - `runtime.mode` is a hard error.
 4. Semantic checks are enforced in code:
    - ranges, required sections, provider uniqueness, restart-policy consistency, automation invariants, hook structure.
+
+Notes from implementation audit:
+
+1. Unknown keys are warned at root and many nested sections, but warning coverage is not uniform (`polling` and `logging` currently do not emit unknown-key warnings).
+2. `function_id == 0` is treated as "not specified" in runtime call resolution; config entries using only `function_id: 0` are runtime-invalid unless `function_name` is also supplied.
+3. `--check-config` validates load-time semantics only; runtime-initialization-time behaviors (for example duplicate automation parameter name redefinition warnings from `ParameterManager`) are outside the current contract gate.
 
 ## 4) Contract Model (Two-Layer Validation)
 
@@ -52,6 +58,11 @@ We will use two required layers, not schema-only:
    - `anolis-runtime --check-config` validates loader behavior and semantic/runtime-coupled checks.
 
 Reason: runtime currently includes compatibility and semantic behavior that cannot be fully or safely encoded as static schema alone without divergence risk.
+
+Critical caveat (must be addressed in close-out):
+
+1. Current schema layer uses Python YAML parsing (`yaml.safe_load`), while runtime uses `yaml-cpp`.
+2. These parsers are not behavior-identical for important edge cases (duplicate keys and YAML scalar resolution), so parser-alignment work is required for truly authoritative two-layer validation.
 
 ## 5) Normative Artifacts
 
@@ -181,6 +192,85 @@ Policy for config surface evolution:
 7. Align docs:
    - keep prose docs, but point to schema + loader tests as source of truth.
 
+## 10A) Critical Audit Findings (Hard-Nosed)
+
+1. Parser divergence is a real contract risk.
+   - Empirical local check: `yaml.safe_load` accepts duplicate keys and applies last-key-wins behavior.
+   - Empirical local check: runtime `yaml-cpp` accepts duplicate keys without hard failure and does not match `PyYAML` behavior for duplicate resolution.
+   - Empirical local check: unquoted YAML 1.1 boolean-like tokens (for example `on`) are resolved differently by `PyYAML` vs runtime behavior.
+2. Duplicate keys are currently silently accepted in the contract path.
+   - This weakens contract safety because "same-looking file" can validate differently depending on parser.
+3. Schema draft/keyword expectations are mixed.
+   - Current schema uses draft-07 validator but includes `deprecated` annotations.
+   - `deprecated` is a metadata keyword introduced in later drafts (2019-09); with a draft-07 validator, it is non-enforced metadata at best.
+4. Fixture coverage is good for baseline semantics but still thin on parser and selector edge cases.
+   - No fixture currently locks duplicate-key behavior.
+   - No fixture currently locks `mode_transition_hooks.calls[].function_id: 0` runtime-invalid semantics.
+5. Contract script currently does not meta-validate the schema against its declared draft before instance validation.
+
+## 10B) Blocking Close-Out Work (Must Finish Before contracts-02)
+
+1. Parser-alignment hardening:
+   - Replace schema-layer YAML loading with a YAML 1.2-capable loader that can reject duplicate keys deterministically (or add an explicit pre-parse duplicate-key gate).
+   - Add tests that prove duplicate-key configs are rejected by contract validation.
+2. Add explicit schema meta-validation:
+   - Run meta-schema check for `runtime-config.schema.json` in the validator script before validating instances.
+3. Add edge fixtures:
+   - `invalid/runtime`: `mode_transition_hooks` call with `function_id: 0` and no `function_name` (must fail runtime check).
+   - `invalid/schema` (or dedicated parse-invalid bucket): duplicate-key config fixture once duplicate-key rejection gate is added.
+   - Parser-resolution fixture(s) for ambiguous YAML scalars to prevent unintentional parser drift.
+4. Tighten behavior documentation:
+   - Document that `--check-config` is load-time contract validation, not full runtime-init validation.
+   - Document exact unknown-key warning behavior (or standardize implementation to warn across all known map sections).
+5. Decide and lock schema draft strategy:
+   - Option A: keep draft-07 and treat `deprecated` as documentation-only annotation.
+   - Option B: migrate validator/schema to newer draft where metadata vocabulary is explicit.
+   - Record decision in `schemas/README.md` and this plan before close-out.
+
+## 10C) Decision Locks (Set Before Implementation)
+
+These decisions are now locked for contracts-01 close-out unless explicitly changed in this document:
+
+1. Test architecture:
+   - Keep Python as orchestration layer (file discovery, schema checks, reporting).
+   - Keep runtime/C++ (`anolis-runtime --check-config`) as semantic authority.
+   - Do not rely on Python YAML semantics as authoritative.
+2. Parser-alignment strategy for this wave:
+   - Implement deterministic duplicate-key rejection in contract tooling.
+   - Add parser-sensitive fixtures so parser drift is observable in CI.
+   - Do not attempt a full runtime parser rewrite in this wave.
+3. Schema draft strategy for this wave:
+   - Keep draft-07 for compatibility/stability.
+   - Treat `deprecated` as non-enforcing annotation and document this explicitly.
+   - Revisit draft migration in a later scoped follow-up, not inside contracts-01 close-out.
+
+## 10D) Execution Slices (Ordered Close-Out)
+
+Slice 1: Parser guardrail.
+1. Add duplicate-key detection gate to contract validation path.
+2. Add failing fixture(s) proving duplicate-key rejection.
+3. Ensure clear failure output with file + key path context.
+
+Slice 2: Runtime semantic edge coverage.
+1. Add `invalid/runtime` fixture for `function_id: 0` without `function_name`.
+2. Add parser-sensitive fixtures for ambiguous scalar literals.
+3. Confirm fixtures pass/fail exactly as intended via runtime binary checks.
+
+Slice 3: Schema gate hardening.
+1. Add schema meta-validation (against declared draft/meta-schema) before instance checks.
+2. Keep instance validation behavior unchanged otherwise.
+3. Document the draft-07 + `deprecated` annotation semantics in schema docs.
+
+Slice 4: Documentation normalization.
+1. Align baseline docs with audited behavior (unknown-key warning coverage and parser authority note).
+2. Clarify `--check-config` scope as load-time semantics (not full runtime-init behavior).
+3. Confirm local + CI workflow docs match actual gate order and behavior.
+
+Slice 5: Final contract close-out verification.
+1. Run full contract script against tracked runtime configs + fixtures.
+2. Run local verification script to ensure integrated flow is stable.
+3. Confirm CI lane is green with new guardrails.
+
 ## 11) CI and Local Gates
 
 Required CI gates:
@@ -189,11 +279,14 @@ Required CI gates:
 2. Runtime config fixture suite passes.
 3. All tracked runtime YAML files pass schema and `--check-config`.
 4. Failure output includes exact file and failing field/rule.
+5. Contract gate rejects duplicate-key YAML (after parser-alignment slice lands).
+6. Schema meta-validation gate runs before instance checks.
 
 Required local workflow:
 
 1. Single command to run runtime config contract checks.
 2. `verify-local` includes runtime config contract check by default.
+3. Local contract check behavior is parser-consistent with CI (same loader/settings).
 
 ## 12) Acceptance Criteria
 
@@ -205,6 +298,18 @@ Done when all are true:
 4. Docs clearly state:
    - runtime schema + loader checks are authoritative,
    - provider-local configs are out of this contract scope.
+5. Parser-alignment close-out complete:
+   - duplicate keys are rejected deterministically in contract validation.
+   - parser-sensitive fixtures are present and enforced in CI.
+6. Schema meta-validation is enforced.
+7. Decision locks in section 10C are reflected in implementation and docs.
+
+## 12A) No-Go Criteria (Do Not Start contracts-02 If Any Hold)
+
+1. Duplicate keys can still pass contract validation.
+2. Parser-sensitive fixtures are absent or flaky across environments.
+3. Schema meta-validation is missing.
+4. Baseline docs still state behavior that differs from audited runtime implementation.
 
 ## 13) Risks and Mitigations
 
@@ -214,3 +319,47 @@ Done when all are true:
    - Mitigation: strict runtime-file target patterns only.
 3. Risk: Future cleanup of deprecated aliases breaks existing configs abruptly.
    - Mitigation: explicit deprecation window with fixture and changelog requirements.
+4. Risk: Parser drift (schema-layer vs runtime-layer) creates false pass/fail outcomes.
+   - Mitigation: parser-alignment slice + duplicate-key rejection + parser edge fixtures.
+
+## 14) External Hard Facts (for Decisions)
+
+1. YAML requires unique mapping keys.
+   - YAML 1.2/1.2.2 spec materials state mapping keys are unique and duplicates are an error/non-portable behavior.
+   - Reference: https://yaml.org/spec/1.2.0/
+2. JSON object duplicate-name behavior is not reliably interoperable.
+   - RFC guidance states object names SHOULD be unique and duplicate-name behavior is implementation-dependent.
+   - Reference: https://www.rfc-editor.org/rfc/rfc8259
+3. JSON Schema `deprecated` is a metadata/annotation concept introduced in later drafts (2019-09 metadata vocabulary), not a validation assertion in draft-07.
+   - Reference: https://json-schema.org/draft/2020-12
+
+## 15) Drift-Elimination Control Matrix
+
+Each drift class must have a primary control and at least one backstop:
+
+1. Shape/type drift:
+   - Primary: JSON Schema validation.
+   - Backstop: runtime `--check-config` on all tracked runtime YAML files.
+2. Semantic drift:
+   - Primary: runtime `--check-config`.
+   - Backstop: `invalid/runtime` fixture coverage for each known semantic rule family.
+3. Parser drift:
+   - Primary: duplicate-key rejection + parser-sensitive fixtures.
+   - Backstop: runtime parser authority documented and enforced in validation flow.
+4. Documentation drift:
+   - Primary: baseline docs updated as part of close-out slices.
+   - Backstop: local/CI workflow docs tied to the same contract command path.
+5. Scope drift (wrong files accidentally validated):
+   - Primary: strict runtime-file discovery patterns.
+   - Backstop: explicit exclusions and fixture directory contracts.
+
+## 16) Immediate Remaining Items (Execution-Ready Checklist)
+
+1. Implement duplicate-key rejection in contract tooling and add failing fixture.
+2. Add `invalid/runtime` fixture for hook call selector edge (`function_id: 0`, missing `function_name`).
+3. Add schema meta-validation in validator script.
+4. Update docs:
+   - `schemas/README.md`
+   - `docs/contracts/runtime-config-baseline.md`
+   - `docs/local-verification.md` (if execution flow text drifts again)
+5. Re-run contract gate locally and in CI; close only when all no-go criteria are clear.
